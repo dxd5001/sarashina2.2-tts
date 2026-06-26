@@ -203,22 +203,17 @@ async def text_to_speech(
         # Concatenate all segments
         final_wav = concat_wavs(all_wavs, sample_rate=FlowDecoder.sample_rate)
 
-        # Save to temporary file
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=f".{response_format}"
-        ) as tmp_output:
-            if response_format == "wav":
-                sf.write(tmp_output.name, final_wav.numpy(), FlowDecoder.sample_rate)
-            else:  # mp3
-                # For MP3, we'd need ffmpeg or similar
-                # For now, save as WAV and let the client handle conversion
-                sf.write(tmp_output.name, final_wav.numpy(), FlowDecoder.sample_rate)
-                tmp_output.name = tmp_output.name.replace(".mp3", ".wav")
+        # Save to temporary file (always WAV for now)
+        # MP3 conversion would require ffmpeg or similar
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_output:
+            sf.write(tmp_output.name, final_wav.numpy(), FlowDecoder.sample_rate)
 
+        # Return WAV file regardless of requested format
+        # Client can convert if needed
         return FileResponse(
             tmp_output.name,
             media_type="audio/wav",
-            filename=f"output.{response_format}",
+            filename="output.wav",
         )
 
     finally:
