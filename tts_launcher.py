@@ -311,23 +311,10 @@ def setup_tray() -> pystray.Icon:
 
 
 def main() -> None:
-    """Start Gradio, open browser, and run tray icon."""
+    """Start tray icon without auto-starting servers."""
     global tray_icon
 
     write_log("Launcher started")
-    start_gradio()
-    if wait_for_gradio():
-        write_log(f"Gradio is ready at {GRADIO_URL}")
-        open_tts_ui()
-    else:
-        if gradio_process is not None:
-            write_log(
-                f"Gradio did not become ready. Return code: {gradio_process.poll()}"
-            )
-        else:
-            write_log("Gradio did not become ready. No process was started.")
-        webbrowser.open(GRADIO_URL)
-
     tray_icon = setup_tray()
     tray_icon.run()
 
