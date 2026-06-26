@@ -1,7 +1,7 @@
 """
 Sarashina TTS Launcher
 =====================
-Pystray-based launcher for the Gradio web UI.
+Pystray-based launcher for Gradio web UI and FastAPI server.
 """
 
 import os
@@ -17,13 +17,16 @@ from PIL import Image, ImageDraw
 
 APP_NAME = "Sarashina TTS Launcher"
 HOST = "127.0.0.1"
-PORT = 7860
-URL = f"http://localhost:{PORT}"
+GRADIO_PORT = 7860
+FASTAPI_PORT = 8000
+GRADIO_URL = f"http://localhost:{GRADIO_PORT}"
+FASTAPI_URL = f"http://localhost:{FASTAPI_PORT}"
 STARTUP_TIMEOUT_SECONDS = 60
 GRADIO_CHILD_ARG = "--gradio-child"
 MAX_LOG_SIZE_BYTES = 1_000_000
 
 gradio_process = None
+fastapi_process = None
 tray_icon = None
 
 
@@ -37,6 +40,11 @@ def get_base_path() -> Path:
 def get_gradio_app_path() -> Path:
     """Return the Gradio application path."""
     return get_base_path() / "server" / "gradio_app.py"
+
+
+def get_fastapi_app_path() -> Path:
+    """Return the FastAPI application path."""
+    return get_base_path() / "server" / "fastapi_app.py"
 
 
 def get_tray_icon_path() -> Path:
@@ -84,7 +92,17 @@ def wait_for_gradio() -> bool:
     """Wait until Gradio is ready or timeout is reached."""
     deadline = time.time() + STARTUP_TIMEOUT_SECONDS
     while time.time() < deadline:
-        if is_port_open(HOST, PORT):
+        if is_port_open(HOST, GRADIO_PORT):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def wait_for_fastapi() -> bool:
+    """Wait until FastAPI is ready or timeout is reached."""
+    deadline = time.time() + STARTUP_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        if is_port_open(HOST, FASTAPI_PORT):
             return True
         time.sleep(0.5)
     return False
@@ -107,8 +125,8 @@ def start_gradio() -> None:
     """Start Gradio server if it is not already running."""
     global gradio_process
 
-    if is_port_open(HOST, PORT):
-        write_log(f"Gradio is already running at {URL}")
+    if is_port_open(HOST, GRADIO_PORT):
+        write_log(f"Gradio is already running at {GRADIO_URL}")
         return
 
     gradio_app_path = get_gradio_app_path()
@@ -167,7 +185,7 @@ def stop_gradio() -> None:
         # Try to kill process on port 7860
         try:
             result = subprocess.run(
-                ["lsof", "-ti", str(PORT)],
+                ["lsof", "-ti", str(GRADIO_PORT)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -175,15 +193,87 @@ def stop_gradio() -> None:
             if result.stdout.strip():
                 pids = result.stdout.strip().split("\n")
                 for pid in pids:
-                    write_log(f"Killing process {pid} on port {PORT}")
+                    write_log(f"Killing process {pid} on port {GRADIO_PORT}")
                     subprocess.run(["kill", "-9", pid], check=False)
         except Exception as e:
-            write_log(f"Error killing process on port {PORT}: {e}")
+            write_log(f"Error killing process on port {GRADIO_PORT}: {e}")
+
+
+def start_fastapi() -> None:
+    """Start FastAPI server if it is not already running."""
+    global fastapi_process
+
+    if is_port_open(HOST, FASTAPI_PORT):
+        write_log(f"FastAPI is already running at {FASTAPI_URL}")
+        return
+
+    fastapi_app_path = get_fastapi_app_path()
+    write_log(f"Starting FastAPI with app path: {fastapi_app_path}")
+
+    # Activate virtual environment if it exists
+    venv_path = get_base_path() / "venv"
+    if venv_path.exists():
+        python_path = venv_path / "bin" / "python"
+        if not python_path.exists():
+            python_path = venv_path / "Scripts" / "python.exe"  # Windows
+    else:
+        python_path = sys.executable
+
+    if getattr(sys, "frozen", False):
+        # Running from PyInstaller bundle
+        python_path = sys.executable
+
+    log_path = get_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        cmd = [str(python_path), str(fastapi_app_path)]
+        write_log(f"FastAPI command: {' '.join(cmd)}")
+
+        fastapi_process = subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=log_file,
+        )
+        write_log(f"FastAPI process started with PID: {fastapi_process.pid}")
+
+
+def stop_fastapi() -> None:
+    """Stop FastAPI server if it is running."""
+    global fastapi_process
+
+    if fastapi_process is not None and fastapi_process.poll() is None:
+        write_log(f"Stopping FastAPI process (PID: {fastapi_process.pid})")
+        fastapi_process.terminate()
+        try:
+            fastapi_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            write_log("FastAPI process did not terminate gracefully, killing...")
+            fastapi_process.kill()
+            fastapi_process.wait()
+        fastapi_process = None
+        write_log("FastAPI process stopped")
+    else:
+        # Try to kill process on port 8000
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", str(FASTAPI_PORT)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.stdout.strip():
+                pids = result.stdout.strip().split("\n")
+                for pid in pids:
+                    write_log(f"Killing process {pid} on port {FASTAPI_PORT}")
+                    subprocess.run(["kill", "-9", pid], check=False)
+        except Exception as e:
+            write_log(f"Error killing process on port {FASTAPI_PORT}: {e}")
 
 
 def open_tts_ui() -> None:
     """Open Sarashina TTS Web UI in the default browser."""
-    webbrowser.open(URL)
+    webbrowser.open(GRADIO_URL)
 
 
 def show_logs() -> None:
@@ -196,10 +286,11 @@ def show_logs() -> None:
 
 
 def quit_app(icon: pystray.Icon) -> None:
-    """Stop Gradio and quit the tray application."""
-    global gradio_process
+    """Stop Gradio, FastAPI and quit the tray application."""
+    global gradio_process, fastapi_process
 
     stop_gradio()
+    stop_fastapi()
     icon.stop()
 
 
@@ -208,8 +299,10 @@ def setup_tray() -> pystray.Icon:
     menu = pystray.Menu(
         pystray.MenuItem("Open Sarashina TTS", lambda: open_tts_ui()),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Start Server", lambda: start_gradio()),
-        pystray.MenuItem("Stop Server", lambda: stop_gradio()),
+        pystray.MenuItem("Start Gradio", lambda: start_gradio()),
+        pystray.MenuItem("Stop Gradio", lambda: stop_gradio()),
+        pystray.MenuItem("Start FastAPI", lambda: start_fastapi()),
+        pystray.MenuItem("Stop FastAPI", lambda: stop_fastapi()),
         pystray.MenuItem("Show Logs", lambda: show_logs()),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", quit_app),
@@ -224,7 +317,7 @@ def main() -> None:
     write_log("Launcher started")
     start_gradio()
     if wait_for_gradio():
-        write_log(f"Gradio is ready at {URL}")
+        write_log(f"Gradio is ready at {GRADIO_URL}")
         open_tts_ui()
     else:
         if gradio_process is not None:
@@ -233,7 +326,7 @@ def main() -> None:
             )
         else:
             write_log("Gradio did not become ready. No process was started.")
-        webbrowser.open(URL)
+        webbrowser.open(GRADIO_URL)
 
     tray_icon = setup_tray()
     tray_icon.run()
