@@ -28,6 +28,7 @@ MAX_LOG_SIZE_BYTES = 1_000_000
 gradio_process = None
 fastapi_process = None
 tray_icon = None
+model_dir = None
 
 
 def get_base_path() -> Path:
@@ -57,6 +58,26 @@ def get_log_path() -> Path:
     log_dir = Path.home() / ".sarashina_tts" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir / "tts_launcher.log"
+
+
+def get_model_dir_path() -> Path:
+    """Return model directory path.
+
+    Priority:
+    1. Global model_dir variable (set via command line arg)
+    2. SARASHINA_MODEL_DIR environment variable
+    3. Default: ~/.sarashina_tts/pretrained_models
+    """
+    global model_dir
+    if model_dir:
+        return Path(model_dir)
+
+    env_model_dir = os.environ.get("SARASHINA_MODEL_DIR")
+    if env_model_dir:
+        return Path(env_model_dir)
+
+    default_model_dir = Path.home() / ".sarashina_tts" / "pretrained_models"
+    return default_model_dir
 
 
 def rotate_log_if_needed(log_path: Path) -> None:
@@ -130,7 +151,9 @@ def start_gradio() -> None:
         return
 
     gradio_app_path = get_gradio_app_path()
+    model_dir_path = get_model_dir_path()
     write_log(f"Starting Gradio with app path: {gradio_app_path}")
+    write_log(f"Using model directory: {model_dir_path}")
 
     # Activate virtual environment if it exists
     venv_path = get_base_path() / "venv"
@@ -142,13 +165,21 @@ def start_gradio() -> None:
         python_path = sys.executable
 
     if getattr(sys, "frozen", False):
-        command = [str(python_path), GRADIO_CHILD_ARG, str(gradio_app_path)]
+        command = [
+            str(python_path),
+            GRADIO_CHILD_ARG,
+            str(gradio_app_path),
+            "--model-dir",
+            str(model_dir_path),
+        ]
     else:
         command = [
             str(python_path),
             str(Path(__file__).resolve()),
             GRADIO_CHILD_ARG,
             str(gradio_app_path),
+            "--model-dir",
+            str(model_dir_path),
         ]
 
     write_log(f"Gradio command: {' '.join(command)}")
@@ -208,7 +239,9 @@ def start_fastapi() -> None:
         return
 
     fastapi_app_path = get_fastapi_app_path()
+    model_dir_path = get_model_dir_path()
     write_log(f"Starting FastAPI with app path: {fastapi_app_path}")
+    write_log(f"Using model directory: {model_dir_path}")
 
     # Activate virtual environment if it exists
     venv_path = get_base_path() / "venv"
@@ -227,7 +260,12 @@ def start_fastapi() -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(log_path, "a", encoding="utf-8") as log_file:
-        cmd = [str(python_path), str(fastapi_app_path)]
+        cmd = [
+            str(python_path),
+            str(fastapi_app_path),
+            "--model-dir",
+            str(model_dir_path),
+        ]
         write_log(f"FastAPI command: {' '.join(cmd)}")
 
         fastapi_process = subprocess.Popen(
@@ -327,11 +365,24 @@ def run_gradio_child() -> None:
     except (ValueError, IndexError):
         raise SystemExit("Missing Gradio app path.")
 
+    # Check for --model-dir argument
+    model_dir = None
+    try:
+        model_dir_index = sys.argv.index("--model-dir")
+        model_dir = sys.argv[model_dir_index + 1]
+    except (ValueError, IndexError):
+        pass
+
+    # Build command with model directory if provided
+    cmd = [sys.executable, app_path]
+    if model_dir:
+        cmd.extend(["--model-dir", model_dir])
+
     # Run the Gradio app directly
     import subprocess
 
     result = subprocess.run(
-        [sys.executable, app_path],
+        cmd,
         cwd=str(get_base_path()),
         check=False,
     )

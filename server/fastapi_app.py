@@ -8,6 +8,7 @@ import tempfile
 import uuid
 import shutil
 import asyncio
+import argparse
 from typing import List, Optional, Dict
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -31,6 +32,9 @@ cache: dict = {}
 
 # Task storage for async processing
 tasks: Dict[str, Dict] = {}
+
+# Model directory path
+model_dir = None
 
 
 class TaskStatus(str, Enum):
@@ -114,7 +118,10 @@ def init_generator():
     """Initialize the SarashinaTTSGenerator."""
     global gen
     if gen is None:
-        gen = SarashinaTTSGenerator()
+        if model_dir:
+            gen = SarashinaTTSGenerator(model_dir=model_dir)
+        else:
+            gen = SarashinaTTSGenerator()
     return gen
 
 
@@ -449,6 +456,18 @@ async def text_to_speech_sync(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Sarashina TTS FastAPI Server")
+    parser.add_argument(
+        "--model-dir",
+        default=None,
+        help="Path to model directory (default: pretrained_models)",
+    )
+    args = parser.parse_args()
+
+    # Set model_dir from command line argument
+    if args.model_dir:
+        model_dir = args.model_dir
+
     uvicorn.run(
         app,
         host="0.0.0.0",
