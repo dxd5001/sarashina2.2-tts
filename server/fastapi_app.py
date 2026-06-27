@@ -203,17 +203,22 @@ async def text_to_speech(
         # Concatenate all segments
         final_wav = concat_wavs(all_wavs, sample_rate=FlowDecoder.sample_rate)
 
-        # Save to temporary file (always WAV for now)
-        # MP3 conversion would require ffmpeg or similar
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_output:
-            sf.write(tmp_output.name, final_wav.numpy(), FlowDecoder.sample_rate)
+        # Save to temporary directory using gen.save_audios
+        # This handles the audio format correctly
+        import shutil
 
-        # Return WAV file regardless of requested format
-        # Client can convert if needed
+        tmp_dir = tempfile.mkdtemp()
+        paths = gen.save_audios([final_wav], output_dir=tmp_dir)
+        output_path = paths[0]
+
+        # Return WAV file with background cleanup
+        from starlette.background import BackgroundTask
+
         return FileResponse(
-            tmp_output.name,
+            output_path,
             media_type="audio/wav",
             filename="output.wav",
+            background=BackgroundTask(shutil.rmtree, tmp_dir),
         )
 
     finally:
