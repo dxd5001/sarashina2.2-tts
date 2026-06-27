@@ -5,6 +5,7 @@ Pystray-based launcher for Gradio web UI and FastAPI server.
 """
 
 import os
+import runpy
 import socket
 import subprocess
 import sys
@@ -23,6 +24,7 @@ GRADIO_URL = f"http://localhost:{GRADIO_PORT}"
 FASTAPI_URL = f"http://localhost:{FASTAPI_PORT}"
 STARTUP_TIMEOUT_SECONDS = 60
 GRADIO_CHILD_ARG = "--gradio-child"
+FASTAPI_CHILD_ARG = "--fastapi-child"
 MAX_LOG_SIZE_BYTES = 1_000_000
 
 gradio_process = None
@@ -82,12 +84,10 @@ def get_model_dir_path() -> Path:
 
 def should_use_vllm() -> bool:
     """Return whether vLLM backend should be enabled."""
-    return os.environ.get("SARASHINA_USE_VLLM", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    env_value = os.environ.get("SARASHINA_USE_VLLM")
+    if env_value is not None:
+        return env_value.lower() in {"1", "true", "yes", "on"}
+    return bool(getattr(sys, "frozen", False))
 
 
 def get_python_path() -> Path:
@@ -95,6 +95,11 @@ def get_python_path() -> Path:
     python_path = os.environ.get("SARASHINA_PYTHON_PATH")
     if python_path:
         return Path(python_path)
+
+    vllm_metal_python = Path.home() / ".venv-vllm-metal" / "bin" / "python"
+    if getattr(sys, "frozen", False) and vllm_metal_python.exists():
+        return vllm_metal_python
+
     return Path(sys.executable)
 
 
@@ -177,7 +182,7 @@ def start_gradio() -> None:
 
     python_path = get_python_path()
 
-    if getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False) and python_path == Path(sys.executable):
         command = [
             str(python_path),
             GRADIO_CHILD_ARG,
@@ -188,8 +193,6 @@ def start_gradio() -> None:
     else:
         command = [
             str(python_path),
-            str(Path(__file__).resolve()),
-            GRADIO_CHILD_ARG,
             str(gradio_app_path),
             "--model-dir",
             str(model_dir_path),
@@ -263,20 +266,25 @@ def start_fastapi() -> None:
 
     python_path = get_python_path()
 
-    if getattr(sys, "frozen", False):
-        # Running from PyInstaller bundle
-        python_path = Path(sys.executable)
-
     log_path = get_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(log_path, "a", encoding="utf-8") as log_file:
-        cmd = [
-            str(python_path),
-            str(fastapi_app_path),
-            "--model-dir",
-            str(model_dir_path),
-        ]
+        if getattr(sys, "frozen", False) and python_path == Path(sys.executable):
+            cmd = [
+                str(python_path),
+                FASTAPI_CHILD_ARG,
+                str(fastapi_app_path),
+                "--model-dir",
+                str(model_dir_path),
+            ]
+        else:
+            cmd = [
+                str(python_path),
+                str(fastapi_app_path),
+                "--model-dir",
+                str(model_dir_path),
+            ]
         if use_vllm:
             cmd.append("--use-vllm")
         write_log(f"FastAPI command: {' '.join(cmd)}")
@@ -370,42 +378,23 @@ def main() -> None:
     tray_icon.run()
 
 
-def run_gradio_child() -> None:
-    """Run Gradio inside the child process without starting the launcher."""
+def run_server_child(child_arg: str) -> None:
+    """Run a bundled server script inside a child process."""
     try:
-        child_arg_index = sys.argv.index(GRADIO_CHILD_ARG)
+        child_arg_index = sys.argv.index(child_arg)
         app_path = sys.argv[child_arg_index + 1]
     except (ValueError, IndexError):
-        raise SystemExit("Missing Gradio app path.")
+        raise SystemExit("Missing server app path.")
 
-    # Check for --model-dir argument
-    model_dir = None
-    try:
-        model_dir_index = sys.argv.index("--model-dir")
-        model_dir = sys.argv[model_dir_index + 1]
-    except (ValueError, IndexError):
-        pass
-
-    use_vllm = "--use-vllm" in sys.argv
-
-    cmd = [sys.executable, app_path]
-    if model_dir:
-        cmd.extend(["--model-dir", model_dir])
-    if use_vllm:
-        cmd.append("--use-vllm")
-
-    import subprocess
-
-    result = subprocess.run(
-        cmd,
-        cwd=str(get_base_path()),
-        check=False,
-    )
-    sys.exit(result.returncode)
+    child_args = sys.argv[child_arg_index + 2 :]
+    sys.argv = [app_path, *child_args]
+    runpy.run_path(app_path, run_name="__main__")
 
 
 if __name__ == "__main__":
     if GRADIO_CHILD_ARG in sys.argv:
-        run_gradio_child()
+        run_server_child(GRADIO_CHILD_ARG)
+    elif FASTAPI_CHILD_ARG in sys.argv:
+        run_server_child(FASTAPI_CHILD_ARG)
     else:
         main()
