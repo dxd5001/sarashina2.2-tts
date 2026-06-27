@@ -10,8 +10,8 @@ authors = [
 ]
 dependencies = [
     # Core dependencies
-    "torch<=2.9",
-    "torchaudio<=2.9",
+    "torch<=2.11",
+    "torchaudio<=2.11",
     "transformers",
     "huggingface_hub",
     "numpy<=2.3.5",

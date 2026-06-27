@@ -35,6 +35,7 @@ tasks: Dict[str, Dict] = {}
 
 # Model directory path
 model_dir = None
+use_vllm = False
 
 
 class TaskStatus(str, Enum):
@@ -119,9 +120,9 @@ def init_generator():
     global gen
     if gen is None:
         if model_dir:
-            gen = SarashinaTTSGenerator(model_dir=model_dir)
+            gen = SarashinaTTSGenerator(model_dir=model_dir, use_vllm=use_vllm)
         else:
-            gen = SarashinaTTSGenerator()
+            gen = SarashinaTTSGenerator(use_vllm=use_vllm)
     return gen
 
 
@@ -462,11 +463,18 @@ if __name__ == "__main__":
         default=None,
         help="Path to model directory (default: pretrained_models)",
     )
+    parser.add_argument("--use-vllm", action="store_true", help="Use vLLM backend")
     args = parser.parse_args()
 
     # Set model_dir from command line argument
     if args.model_dir:
         model_dir = args.model_dir
+    use_vllm = args.use_vllm or os.environ.get("SARASHINA_USE_VLLM", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     uvicorn.run(
         app,

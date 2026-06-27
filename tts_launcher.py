@@ -80,6 +80,24 @@ def get_model_dir_path() -> Path:
     return default_model_dir
 
 
+def should_use_vllm() -> bool:
+    """Return whether vLLM backend should be enabled."""
+    return os.environ.get("SARASHINA_USE_VLLM", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def get_python_path() -> Path:
+    """Return Python executable path for child server processes."""
+    python_path = os.environ.get("SARASHINA_PYTHON_PATH")
+    if python_path:
+        return Path(python_path)
+    return Path(sys.executable)
+
+
 def rotate_log_if_needed(log_path: Path) -> None:
     """Rotate the launcher log when it exceeds the maximum size."""
     if not log_path.exists() or log_path.stat().st_size <= MAX_LOG_SIZE_BYTES:
@@ -152,17 +170,12 @@ def start_gradio() -> None:
 
     gradio_app_path = get_gradio_app_path()
     model_dir_path = get_model_dir_path()
+    use_vllm = should_use_vllm()
     write_log(f"Starting Gradio with app path: {gradio_app_path}")
     write_log(f"Using model directory: {model_dir_path}")
+    write_log(f"Using vLLM backend: {use_vllm}")
 
-    # Activate virtual environment if it exists
-    venv_path = get_base_path() / "venv"
-    if venv_path.exists():
-        python_path = venv_path / "bin" / "python"
-        if not python_path.exists():
-            python_path = venv_path / "Scripts" / "python.exe"  # Windows
-    else:
-        python_path = sys.executable
+    python_path = get_python_path()
 
     if getattr(sys, "frozen", False):
         command = [
@@ -181,6 +194,9 @@ def start_gradio() -> None:
             "--model-dir",
             str(model_dir_path),
         ]
+
+    if use_vllm:
+        command.append("--use-vllm")
 
     write_log(f"Gradio command: {' '.join(command)}")
     log_file = open(get_log_path(), "a", encoding="utf-8")
@@ -240,21 +256,16 @@ def start_fastapi() -> None:
 
     fastapi_app_path = get_fastapi_app_path()
     model_dir_path = get_model_dir_path()
+    use_vllm = should_use_vllm()
     write_log(f"Starting FastAPI with app path: {fastapi_app_path}")
     write_log(f"Using model directory: {model_dir_path}")
+    write_log(f"Using vLLM backend: {use_vllm}")
 
-    # Activate virtual environment if it exists
-    venv_path = get_base_path() / "venv"
-    if venv_path.exists():
-        python_path = venv_path / "bin" / "python"
-        if not python_path.exists():
-            python_path = venv_path / "Scripts" / "python.exe"  # Windows
-    else:
-        python_path = sys.executable
+    python_path = get_python_path()
 
     if getattr(sys, "frozen", False):
         # Running from PyInstaller bundle
-        python_path = sys.executable
+        python_path = Path(sys.executable)
 
     log_path = get_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -266,6 +277,8 @@ def start_fastapi() -> None:
             "--model-dir",
             str(model_dir_path),
         ]
+        if use_vllm:
+            cmd.append("--use-vllm")
         write_log(f"FastAPI command: {' '.join(cmd)}")
 
         fastapi_process = subprocess.Popen(
@@ -373,12 +386,14 @@ def run_gradio_child() -> None:
     except (ValueError, IndexError):
         pass
 
-    # Build command with model directory if provided
+    use_vllm = "--use-vllm" in sys.argv
+
     cmd = [sys.executable, app_path]
     if model_dir:
         cmd.extend(["--model-dir", model_dir])
+    if use_vllm:
+        cmd.append("--use-vllm")
 
-    # Run the Gradio app directly
     import subprocess
 
     result = subprocess.run(

@@ -12,8 +12,9 @@
 
 ## 前提条件
 
-- macOS (Apple Silicon推奨)
-- Python 3.12+
+- macOS on Apple Silicon
+- Native arm64 Python 3.12
+- Xcode Command Line Tools
 - PyInstaller
 - pystray
 - Pillow
@@ -29,31 +30,60 @@ mkdir -p ~/.sarashina_tts/pretrained_models
 cp -r pretrained_models/* ~/.sarashina_tts/pretrained_models/
 ```
 
-### 2. 依存関係のインストール
+### 2. vLLM-metal環境を作成
+
+macOSでvLLMを使用する場合は、vLLM-metalの公式インストールスクリプトを使用します。専用のPython 3.12環境が`~/.venv-vllm-metal`に作成されます。
+
+```bash
+uname -m
+xcode-select --install
+curl -fsSL https://raw.githubusercontent.com/vllm-project/vllm-metal/main/install.sh | bash
+source ~/.venv-vllm-metal/bin/activate
+```
+
+### 3. Sarashina TTSをvLLM-metal環境に追加
+
+vLLM-metalが要求する依存関係を壊さないように、Sarashina TTSは依存関係を再解決せずにインストールします。
 
 ```bash
 cd sarashina2.2-tts
-python -m venv venv
-source venv/bin/activate
-pip install -e .
+source ~/.venv-vllm-metal/bin/activate
+pip install -e . --no-deps
 pip install pyinstaller pystray pillow
 ```
 
-> **注意**: vLLMは公式にはLinuxのみをサポートしています。macOSで使用するには、コミュニティプラグインの[vllm-metal](https://github.com/vllm-project/vllm-metal)が必要です。また、Python 3.12が推奨されています。Windows/Linuxユーザーは`pip install -e ".[vllm]"`でvLLMを有効化できます。
+> **注意**: `pip install -e .`をそのまま実行すると、Sarashina TTS側の依存制約によりvLLM-metal環境の`torch`/`torchaudio`が変更される場合があります。vLLM-metalを使用する場合は`--no-deps`を付けてください。
 
-### 3. .appのビルド
+### 4. .appのビルド
 
 ```bash
+source ~/.venv-vllm-metal/bin/activate
 pyinstaller "Sarashina TTS.spec"
 ```
 
 ビルドが完了すると、`dist/Sarashina TTS.app`が作成されます。
 
-### 4. .appの使用
+### 5. .appの使用
 
 .appを任意の場所（デスクトップなど）に移動し、ダブルクリックで起動します。メニューバーにアイコンが表示されます。
 
 ## 使用方法
+
+### vLLM-metalを有効化して起動
+
+vLLM-metalを使用する場合は、起動前に`SARASHINA_USE_VLLM=1`を設定します。
+
+```bash
+source ~/.venv-vllm-metal/bin/activate
+export SARASHINA_USE_VLLM=1
+python tts_launcher.py
+```
+
+.appビルド後に環境変数を指定して起動する場合は、ターミナルから以下のように実行します。
+
+```bash
+SARASHINA_USE_VLLM=1 open "dist/Sarashina TTS.app"
+```
 
 ### メニューバーから起動
 
