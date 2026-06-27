@@ -39,7 +39,7 @@ pip install -e .
 pip install pyinstaller pystray pillow
 ```
 
-> **注意**: vLLMはPython 3.14と互換性がないため、macOSでは使用できません。Windows/Linuxユーザーは`pip install -e ".[vllm]"`でvLLMを有効化できます。
+> **注意**: vLLMは公式にはLinuxのみをサポートしています。macOSで使用するには、コミュニティプラグインの[vllm-metal](https://github.com/vllm-project/vllm-metal)が必要です。また、Python 3.12が推奨されています。Windows/Linuxユーザーは`pip install -e ".[vllm]"`でvLLMを有効化できます。
 
 ### 3. .appのビルド
 
