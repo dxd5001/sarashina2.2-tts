@@ -5,15 +5,19 @@ FastAPI server for Sarashina-TTS with OpenAI-compatible API.
 import os
 import hashlib
 import tempfile
-from typing import List, Optional
+import uuid
+import shutil
+import asyncio
+from typing import List, Optional, Dict
 from contextlib import asynccontextmanager
+from enum import Enum
 
-import torch
 import soundfile as sf
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 import uvicorn
+from starlette.background import BackgroundTask
 
 from sarashina_tts.generate.generate import SarashinaTTSGenerator
 from sarashina_tts.flow_matching.decoder import FlowDecoder
@@ -24,6 +28,18 @@ from sarashina_tts.utils.audio_concat import concat_wavs
 # Global generator instance
 gen: Optional[SarashinaTTSGenerator] = None
 cache: dict = {}
+
+# Task storage for async processing
+tasks: Dict[str, Dict] = {}
+
+
+class TaskStatus(str, Enum):
+    """Task status enumeration."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 @asynccontextmanager
@@ -69,6 +85,23 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     supported_formats: List[str]
+
+
+class TaskResponse(BaseModel):
+    """Task creation response."""
+
+    task_id: str
+    status: TaskStatus
+    message: str
+
+
+class TaskStatusResponse(BaseModel):
+    """Task status response."""
+
+    task_id: str
+    status: TaskStatus
+    progress: Optional[str] = None
+    error: Optional[str] = None
 
 
 def _get_audio_duration(filepath: str) -> float:
@@ -129,6 +162,103 @@ async def create_speech(request: SpeechRequest):
     )
 
 
+async def process_tts_task(
+    task_id: str,
+    text: str,
+    prompt_file_path: str,
+    prompt_text: str,
+    max_length: int,
+    temperature: float,
+    top_p: float,
+):
+    """Process TTS generation in background."""
+    global tasks
+
+    try:
+        tasks[task_id]["status"] = TaskStatus.PROCESSING
+        tasks[task_id]["progress"] = "Loading prompt audio..."
+
+        # Load prompt audio
+        prompt_audio, sr = sf.read(prompt_file_path)
+        if sr != FlowDecoder.sample_rate:
+            from scipy import signal
+
+            num_samples = int(len(prompt_audio) * FlowDecoder.sample_rate / sr)
+            prompt_audio = signal.resample(prompt_audio, num_samples)
+
+        tasks[task_id]["progress"] = "Extracting audio prompt features..."
+
+        # Extract prompt features
+        if gen is None:
+            raise HTTPException(status_code=503, detail="Model not initialized")
+
+        key = hashlib.md5(
+            prompt_audio.tobytes() + prompt_text.encode("utf-8")
+        ).hexdigest()
+
+        if key not in cache:
+            tokens, feat = gen.extract_audio_prompt(
+                prompt_audio, prompt_text=prompt_text
+            )
+            cache[key] = (tokens, feat)
+        else:
+            tokens, feat = cache[key]
+
+        tasks[task_id]["progress"] = "Splitting text into segments..."
+
+        # Split text
+        segments = split_text(
+            text,
+            strategy=STRATEGY_AUTO,
+            prompt_duration_sec=len(prompt_audio) / FlowDecoder.sample_rate,
+        )
+
+        tasks[task_id]["progress"] = f"Generating {len(segments)} segments..."
+
+        all_wavs = []
+        gen_kwargs = {
+            "max_tokens": max_length,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+
+        for i, seg in enumerate(segments):
+            tasks[task_id]["progress"] = (
+                f"Generating segment {i + 1}/{len(segments)}..."
+            )
+            wavs = gen.generate(
+                text=seg,
+                audio_prompt_text=prompt_text,
+                audio_prompt_tokens=tokens,
+                audio_prompt_feat=feat,
+                watermark=True,
+                gen_kwargs=gen_kwargs,
+            )
+            all_wavs.extend(wavs)
+
+        tasks[task_id]["progress"] = "Concatenating segments..."
+
+        # Concatenate all segments
+        final_wav = concat_wavs(all_wavs, sample_rate=FlowDecoder.sample_rate)
+
+        tasks[task_id]["progress"] = "Saving audio file..."
+
+        # Save to temporary directory using gen.save_audios
+        tmp_dir = tempfile.mkdtemp()
+        paths = gen.save_audios([final_wav], output_dir=tmp_dir)
+        output_path = paths[0]
+
+        tasks[task_id]["status"] = TaskStatus.COMPLETED
+        tasks[task_id]["progress"] = "Completed"
+        tasks[task_id]["output_path"] = output_path
+        tasks[task_id]["tmp_dir"] = tmp_dir
+
+    except Exception as e:
+        tasks[task_id]["status"] = TaskStatus.FAILED
+        tasks[task_id]["error"] = str(e)
+        tasks[task_id]["progress"] = "Failed"
+
+
 @app.post("/tts")
 async def text_to_speech(
     text: str = Form(...),
@@ -140,12 +270,106 @@ async def text_to_speech(
     top_p: float = Form(default=0.95),
 ):
     """
-    Generate speech from text with audio prompt.
+    Generate speech from text with audio prompt (async task).
 
-    This is the main endpoint for Sarashina-TTS which requires:
-    - text: Text to synthesize
-    - prompt_file: Reference audio file for voice cloning
-    - prompt_text: Transcription of the reference audio
+    This endpoint creates a background task and returns a task ID.
+    Use /tts/{task_id} to check status and /tts/{task_id}/download to get the result.
+    """
+    if gen is None:
+        raise HTTPException(status_code=503, detail="Model not initialized")
+
+    # Create task ID
+    task_id = str(uuid.uuid4())
+
+    # Save uploaded prompt file temporarily
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_prompt:
+        tmp_prompt.write(await prompt_file.read())
+        tmp_prompt_path = tmp_prompt.name
+
+    # Initialize task
+    tasks[task_id] = {
+        "status": TaskStatus.PENDING,
+        "progress": "Queued",
+        "error": None,
+        "output_path": None,
+        "tmp_dir": None,
+    }
+
+    # Start background task
+    asyncio.create_task(
+        process_tts_task(
+            task_id,
+            text,
+            tmp_prompt_path,
+            prompt_text,
+            max_length,
+            temperature,
+            top_p,
+        )
+    )
+
+    return TaskResponse(
+        task_id=task_id,
+        status=TaskStatus.PENDING,
+        message="Task created. Use /tts/{task_id} to check status.",
+    )
+
+
+@app.get("/tts/{task_id}")
+async def get_task_status(task_id: str):
+    """Get task status."""
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    task = tasks[task_id]
+    return TaskStatusResponse(
+        task_id=task_id,
+        status=task["status"],
+        progress=task["progress"],
+        error=task["error"],
+    )
+
+
+@app.get("/tts/{task_id}/download")
+async def download_task_result(task_id: str):
+    """Download task result audio file."""
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    task = tasks[task_id]
+
+    if task["status"] != TaskStatus.COMPLETED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task not completed. Current status: {task['status']}",
+        )
+
+    if task["output_path"] is None or not os.path.exists(task["output_path"]):
+        raise HTTPException(status_code=404, detail="Output file not found")
+
+    return FileResponse(
+        task["output_path"],
+        media_type="audio/wav",
+        filename="output.wav",
+        background=BackgroundTask(shutil.rmtree, task["tmp_dir"]),
+    )
+
+
+@app.post("/tts/sync")
+async def text_to_speech_sync(
+    text: str = Form(...),
+    prompt_file: UploadFile = File(...),
+    prompt_text: str = Form(default=""),
+    response_format: str = Form(default="mp3"),
+    max_length: int = Form(default=2000),
+    temperature: float = Form(default=0.9),
+    top_p: float = Form(default=0.95),
+):
+    """
+    Generate speech from text with audio prompt (synchronous).
+
+    This is the original synchronous endpoint for backward compatibility.
+    Note: This may timeout for long texts.
     """
     if gen is None:
         raise HTTPException(status_code=503, detail="Model not initialized")
@@ -156,42 +380,44 @@ async def text_to_speech(
         tmp_prompt_path = tmp_prompt.name
 
     try:
-        # Compute cache key
-        with open(tmp_prompt_path, "rb") as f:
-            data = f.read()
-        key = hashlib.md5(data + prompt_text.encode("utf-8")).hexdigest()
+        # Load prompt audio
+        prompt_audio, sr = sf.read(tmp_prompt_path)
+        if sr != FlowDecoder.sample_rate:
+            from scipy import signal
+
+            num_samples = int(len(prompt_audio) * FlowDecoder.sample_rate / sr)
+            prompt_audio = signal.resample(prompt_audio, num_samples)
+
+        # Extract prompt features
+        key = hashlib.md5(
+            prompt_audio.tobytes() + prompt_text.encode("utf-8")
+        ).hexdigest()
 
         if key not in cache:
-            flow_emb = gen._extract_zero_shot_embedding(tmp_prompt_path)
-            tokens = gen._extract_audio_prompt_tokens(tmp_prompt_path)
-            feat = gen._extract_audio_prompt_feat(tmp_prompt_path)
-            cache[key] = (flow_emb, tokens, feat)
+            tokens, feat = gen.extract_audio_prompt(
+                prompt_audio, prompt_text=prompt_text
+            )
+            cache[key] = (tokens, feat)
         else:
-            flow_emb, tokens, feat = cache[key]
+            tokens, feat = cache[key]
 
+        # Split text
+        segments = split_text(
+            text,
+            strategy=STRATEGY_AUTO,
+            prompt_duration_sec=len(prompt_audio) / FlowDecoder.sample_rate,
+        )
+
+        all_wavs = []
         gen_kwargs = {
-            "max_length": max_length,
-            "repetition_penalty": 1.0,
-            "do_sample": True,
+            "max_tokens": max_length,
             "temperature": temperature,
             "top_p": top_p,
         }
 
-        # Split text into segments
-        prompt_duration = _get_audio_duration(tmp_prompt_path)
-        segments = split_text(
-            text,
-            strategy=STRATEGY_AUTO,
-            prompt_duration_s=prompt_duration,
-        )
-
-        # Generate each segment
-        all_wavs: List[torch.Tensor] = []
-        for segment in segments:
+        for seg in segments:
             wavs = gen.generate(
-                texts=[segment],
-                flow_embedding=flow_emb,
-                audio_prompt_path=tmp_prompt_path,
+                text=seg,
                 audio_prompt_text=prompt_text,
                 audio_prompt_tokens=tokens,
                 audio_prompt_feat=feat,
@@ -204,16 +430,11 @@ async def text_to_speech(
         final_wav = concat_wavs(all_wavs, sample_rate=FlowDecoder.sample_rate)
 
         # Save to temporary directory using gen.save_audios
-        # This handles the audio format correctly
-        import shutil
-
         tmp_dir = tempfile.mkdtemp()
         paths = gen.save_audios([final_wav], output_dir=tmp_dir)
         output_path = paths[0]
 
         # Return WAV file with background cleanup
-        from starlette.background import BackgroundTask
-
         return FileResponse(
             output_path,
             media_type="audio/wav",
