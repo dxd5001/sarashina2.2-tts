@@ -53,3 +53,5 @@ pretrained_models/
 .DS_Store
 
 slurm_script/
+
+sarashina-tts.code-workspace
