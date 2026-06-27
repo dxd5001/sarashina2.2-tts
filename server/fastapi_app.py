@@ -228,4 +228,12 @@ async def text_to_speech(
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        timeout_keep_alive=300,  # 5 minutes keep-alive timeout
+        timeout_graceful_shutdown=30,  # 30 seconds graceful shutdown
+        workers=1,  # Single worker for TTS generation (model is memory-intensive)
+        limit_concurrency=2,  # Limit concurrent requests
+    )
