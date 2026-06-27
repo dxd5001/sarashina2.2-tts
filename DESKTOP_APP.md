@@ -35,9 +35,11 @@ cp -r pretrained_models/* ~/.sarashina_tts/pretrained_models/
 cd sarashina2.2-tts
 python -m venv venv
 source venv/bin/activate
-pip install -e ".[vllm]"
+pip install -e .
 pip install pyinstaller pystray pillow
 ```
+
+> **注意**: vLLMはPython 3.14と互換性がないため、macOSでは使用できません。Windows/Linuxユーザーは`pip install -e ".[vllm]"`でvLLMを有効化できます。
 
 ### 3. .appのビルド
 
